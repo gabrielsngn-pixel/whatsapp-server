@@ -138,11 +138,14 @@ async function createOrRestoreSession(userId) {
   sock.ev.on("messages.upsert", async ({ messages }) => {
     for (const msg of messages) {
       if (!msg.message || msg.key.fromMe) continue;
+      if (msg.key.remoteJid?.includes("@g.us")) continue;
 
       const phone = (msg.key.remoteJid || "").replace("@s.whatsapp.net", "");
       const content =
         msg.message.conversation ||
         msg.message.extendedTextMessage?.text ||
+        msg.message.imageMessage?.caption ||
+        msg.message.videoMessage?.caption ||
         "[mensagem]";
 
       await postWebhook({
@@ -160,6 +163,7 @@ async function createOrRestoreSession(userId) {
 
 function normalizePhone(phone) {
   const digits = String(phone).replace(/\D/g, "");
+  if (!digits) return "";
   if (digits.startsWith("55")) return digits;
   return `55${digits}`;
 }
@@ -194,9 +198,14 @@ app.post("/whatsapp/connect", async (req, res) => {
   }
 });
 
-app.get("/whatsapp/status", (req, res) => {
+app.post("/whatsapp/status", (req, res) => {
   try {
-    const { user_id } = req.query;
+    const { user_id } = req.body;
+
+    if (!user_id) {
+      return res.status(400).json({ error: "user_id obrigatório" });
+    }
+
     const session = getSafeSession(user_id);
 
     if (!session) {
@@ -216,19 +225,27 @@ app.get("/whatsapp/status", (req, res) => {
 app.post("/whatsapp/send", async (req, res) => {
   try {
     const { user_id, phone, message } = req.body;
+
+    if (!user_id || !phone || !message) {
+      return res
+        .status(400)
+        .json({ error: "user_id, phone e message são obrigatórios" });
+    }
+
     const session = getSafeSession(user_id);
 
     if (!session || session.status !== "connected") {
       return res.status(400).json({ error: "WhatsApp não conectado" });
     }
 
-    const jid = `${normalizePhone(phone)}@s.whatsapp.net`;
+    const normalized = normalizePhone(phone);
+    const jid = `${normalized}@s.whatsapp.net`;
 
     await session.sock.sendMessage(jidNormalizedUser(jid), { text: message });
 
     await postWebhook({
       user_id,
-      phone,
+      phone: normalized,
       message,
       timestamp: new Date().toISOString(),
       direction: "outbound"
