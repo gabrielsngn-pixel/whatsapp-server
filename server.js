@@ -30,11 +30,16 @@ const logger = pino({ level: "info" });
 const sessions = new Map();
 
 function authMiddleware(req, res, next) {
+  // libera rotas públicas
+  if (req.path === "/" || req.path === "/health") return next();
+
   if (!API_KEY) return next();
+
   const headerKey = req.headers["x-api-key"];
   if (headerKey !== API_KEY) {
     return res.status(401).json({ error: "Unauthorized" });
   }
+
   next();
 }
 
@@ -50,6 +55,7 @@ function getSafeSession(userId) {
 
 async function postWebhook(payload) {
   if (!WEBHOOK_URL) return;
+
   try {
     await axios.post(WEBHOOK_URL, payload, {
       headers: {
@@ -151,10 +157,17 @@ function normalizePhone(phone) {
   return `55${digits}`;
 }
 
+// 🔥 rota raiz (evita erro do Railway)
+app.get("/", (_, res) => {
+  res.json({ ok: true, service: "whatsapp-server" });
+});
+
+// 🔥 health check
 app.get("/health", (_, res) => {
   res.json({ ok: true });
 });
 
+// conectar
 app.post("/whatsapp/connect", async (req, res) => {
   const { user_id } = req.body;
 
@@ -170,6 +183,7 @@ app.post("/whatsapp/connect", async (req, res) => {
   });
 });
 
+// status
 app.get("/whatsapp/status", (req, res) => {
   const { user_id } = req.query;
 
@@ -185,6 +199,7 @@ app.get("/whatsapp/status", (req, res) => {
   });
 });
 
+// enviar mensagem
 app.post("/whatsapp/send", async (req, res) => {
   const { user_id, phone, message } = req.body;
 
@@ -211,6 +226,7 @@ app.post("/whatsapp/send", async (req, res) => {
   res.json({ ok: true });
 });
 
-app.listen(PORT, () => {
+// 🚀 start servidor (compatível Railway)
+app.listen(PORT, "0.0.0.0", () => {
   console.log("🚀 Servidor rodando na porta", PORT);
 });
