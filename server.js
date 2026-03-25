@@ -26,11 +26,14 @@ if (!fs.existsSync(SESSIONS_DIR)) {
 }
 
 const logger = pino({ level: "info" });
-
 const sessions = new Map();
 
+app.use((req, res, next) => {
+  console.log(`[REQ] ${req.method} ${req.path}`);
+  next();
+});
+
 function authMiddleware(req, res, next) {
-  // libera rotas públicas
   if (req.path === "/" || req.path === "/health") return next();
 
   if (!API_KEY) return next();
@@ -61,10 +64,11 @@ async function postWebhook(payload) {
       headers: {
         "Content-Type": "application/json",
         ...(API_KEY ? { "x-api-key": API_KEY } : {})
-      }
+      },
+      timeout: 10000
     });
   } catch (error) {
-    logger.error("Erro webhook:", error.message);
+    console.log("[WEBHOOK_ERROR]", error.message);
   }
 }
 
@@ -103,12 +107,13 @@ async function createOrRestoreSession(userId) {
     if (qr) {
       sessionData.qrCodeDataUrl = await QRCode.toDataURL(qr);
       sessionData.status = "pending";
+      console.log(`QR gerado para ${userId}`);
     }
 
     if (connection === "open") {
       sessionData.status = "connected";
       sessionData.qrCodeDataUrl = null;
-      console.log("✅ WhatsApp conectado:", userId);
+      console.log(`WhatsApp conectado: ${userId}`);
     }
 
     if (connection === "close") {
@@ -117,11 +122,14 @@ async function createOrRestoreSession(userId) {
         lastDisconnect.error.output.statusCode !== DisconnectReason.loggedOut;
 
       sessionData.status = "disconnected";
+      console.log(`Conexão fechada: ${userId} | reconnect=${shouldReconnect}`);
 
       if (shouldReconnect) {
         setTimeout(() => {
           sessions.delete(userId);
-          createOrRestoreSession(userId);
+          createOrRestoreSession(userId).catch((err) => {
+            console.log("[RECONNECT_ERROR]", err.message);
+          });
         }, 3000);
       }
     }
@@ -132,7 +140,6 @@ async function createOrRestoreSession(userId) {
       if (!msg.message || msg.key.fromMe) continue;
 
       const phone = (msg.key.remoteJid || "").replace("@s.whatsapp.net", "");
-
       const content =
         msg.message.conversation ||
         msg.message.extendedTextMessage?.text ||
@@ -157,76 +164,83 @@ function normalizePhone(phone) {
   return `55${digits}`;
 }
 
-// 🔥 rota raiz (evita erro do Railway)
 app.get("/", (_, res) => {
-  res.json({ ok: true, service: "whatsapp-server" });
+  console.log("Rota raiz ok");
+  res.status(200).json({ ok: true, service: "whatsapp-server" });
 });
 
-// 🔥 health check
 app.get("/health", (_, res) => {
-  res.json({ ok: true });
+  console.log("Health ok");
+  res.status(200).json({ ok: true });
 });
 
-// conectar
 app.post("/whatsapp/connect", async (req, res) => {
-  const { user_id } = req.body;
+  try {
+    const { user_id } = req.body;
 
-  if (!user_id) {
-    return res.status(400).json({ error: "user_id obrigatório" });
+    if (!user_id) {
+      return res.status(400).json({ error: "user_id obrigatório" });
+    }
+
+    const session = await createOrRestoreSession(user_id);
+
+    return res.status(200).json({
+      status: session.status,
+      qr_code: session.qrCodeDataUrl
+    });
+  } catch (error) {
+    console.log("[CONNECT_ERROR]", error.message);
+    return res.status(500).json({ error: "Erro ao conectar WhatsApp" });
   }
-
-  const session = await createOrRestoreSession(user_id);
-
-  res.json({
-    status: session.status,
-    qr_code: session.qrCodeDataUrl
-  });
 });
 
-// status
 app.get("/whatsapp/status", (req, res) => {
-  const { user_id } = req.query;
+  try {
+    const { user_id } = req.query;
+    const session = getSafeSession(user_id);
 
-  const session = getSafeSession(user_id);
+    if (!session) {
+      return res.status(200).json({ status: "disconnected" });
+    }
 
-  if (!session) {
-    return res.json({ status: "disconnected" });
+    return res.status(200).json({
+      status: session.status,
+      qr_code: session.qrCodeDataUrl
+    });
+  } catch (error) {
+    console.log("[STATUS_ERROR]", error.message);
+    return res.status(500).json({ error: "Erro ao consultar status" });
   }
-
-  res.json({
-    status: session.status,
-    qr_code: session.qrCodeDataUrl
-  });
 });
 
-// enviar mensagem
 app.post("/whatsapp/send", async (req, res) => {
-  const { user_id, phone, message } = req.body;
+  try {
+    const { user_id, phone, message } = req.body;
+    const session = getSafeSession(user_id);
 
-  const session = getSafeSession(user_id);
+    if (!session || session.status !== "connected") {
+      return res.status(400).json({ error: "WhatsApp não conectado" });
+    }
 
-  if (!session || session.status !== "connected") {
-    return res.status(400).json({ error: "WhatsApp não conectado" });
+    const jid = `${normalizePhone(phone)}@s.whatsapp.net`;
+
+    await session.sock.sendMessage(jidNormalizedUser(jid), { text: message });
+
+    await postWebhook({
+      user_id,
+      phone,
+      message,
+      timestamp: new Date().toISOString(),
+      direction: "outbound"
+    });
+
+    return res.status(200).json({ ok: true });
+  } catch (error) {
+    console.log("[SEND_ERROR]", error.message);
+    return res.status(500).json({ error: "Erro ao enviar mensagem" });
   }
-
-  const jid = `${normalizePhone(phone)}@s.whatsapp.net`;
-
-  await session.sock.sendMessage(jidNormalizedUser(jid), {
-    text: message
-  });
-
-  await postWebhook({
-    user_id,
-    phone,
-    message,
-    timestamp: new Date().toISOString(),
-    direction: "outbound"
-  });
-
-  res.json({ ok: true });
 });
 
-// 🚀 start servidor (compatível Railway)
 app.listen(PORT, "0.0.0.0", () => {
-  console.log("🚀 Servidor rodando na porta", PORT);
+  console.log(`Servidor rodando na porta ${PORT}`);
 });
