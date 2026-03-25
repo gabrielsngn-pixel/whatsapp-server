@@ -72,6 +72,27 @@ async function postWebhook(payload) {
   }
 }
 
+async function destroySession(userId) {
+  userId = String(userId);
+  const session = sessions.get(userId);
+
+  if (session?.sock) {
+    try {
+      await session.sock.logout();
+    } catch (error) {
+      console.log("[DISCONNECT_LOGOUT_WARN]", error.message);
+    }
+  }
+
+  sessions.delete(userId);
+
+  const authDir = getSessionPath(userId);
+  if (fs.existsSync(authDir)) {
+    fs.rmSync(authDir, { recursive: true, force: true });
+    console.log(`[SESSION_REMOVED] ${authDir}`);
+  }
+}
+
 async function createOrRestoreSession(userId) {
   userId = String(userId);
 
@@ -169,12 +190,10 @@ function normalizePhone(phone) {
 }
 
 app.get("/", (_, res) => {
-  console.log("Rota raiz ok");
   res.status(200).json({ ok: true, service: "whatsapp-server" });
 });
 
 app.get("/health", (_, res) => {
-  console.log("Health ok");
   res.status(200).json({ ok: true });
 });
 
@@ -209,7 +228,7 @@ app.post("/whatsapp/status", (req, res) => {
     const session = getSafeSession(user_id);
 
     if (!session) {
-      return res.status(200).json({ status: "disconnected" });
+      return res.status(200).json({ status: "disconnected", qr_code: null });
     }
 
     return res.status(200).json({
@@ -255,6 +274,27 @@ app.post("/whatsapp/send", async (req, res) => {
   } catch (error) {
     console.log("[SEND_ERROR]", error.message);
     return res.status(500).json({ error: "Erro ao enviar mensagem" });
+  }
+});
+
+app.post("/whatsapp/disconnect", async (req, res) => {
+  try {
+    const { user_id } = req.body;
+
+    if (!user_id) {
+      return res.status(400).json({ error: "user_id obrigatório" });
+    }
+
+    await destroySession(user_id);
+
+    return res.status(200).json({
+      ok: true,
+      status: "disconnected",
+      qr_code: null
+    });
+  } catch (error) {
+    console.log("[DISCONNECT_ERROR]", error.message);
+    return res.status(500).json({ error: "Erro ao desconectar WhatsApp" });
   }
 });
 
